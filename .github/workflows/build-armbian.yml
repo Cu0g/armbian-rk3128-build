@@ -1,0 +1,137 @@
+name: Build Armbian for RK3128
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Debian/Ubuntu release'
+        required: true
+        default: 'bullseye'
+        type: choice
+        options:
+          - bullseye
+          - buster
+          - focal
+      desktop:
+        description: 'Build with desktop'
+        required: true
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-armbian.yml'
+      - 'config-rk3128.conf'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android
+          df -h
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl wget
+      
+      - name: Clone Armbian build system (v22.08)
+        run: |
+          git clone --depth=1 --branch=v22.08.2 https://github.com/armbian/build.git armbian-build
+      
+      - name: Create board configuration for RK3128
+        run: |
+          mkdir -p armbian-build/userpatches
+          
+          # Create custom board config if not exists
+          cat > armbian-build/userpatches/config-rk3128-box.conf << 'EOF'
+          # RK3128 Android TV Box configuration
+          BOARD_NAME="RK3128 Box"
+          BOARDFAMILY="rk3128"
+          BOARD_MAINTAINER=""
+          BOOTCONFIG="evb-rk3128_defconfig"
+          KERNEL_TARGET="legacy"
+          FULL_DESKTOP="no"
+          BOOT_LOGO="yes"
+          EOF
+      
+      - name: Prepare kernel config for 4.4.x
+        run: |
+          cd armbian-build
+          
+          # Create kernel config overlay for legacy 4.4.x
+          mkdir -p userpatches/kernel/rockchip-legacy
+          
+          # Disable some problematic options for RK3128
+          cat > userpatches/kernel/rockchip-legacy/config-rk3128.conf << 'EOF'
+          # RK3128 specific kernel config
+          CONFIG_SMP=y
+          CONFIG_NR_CPUS=4
+          CONFIG_LOCALVERSION="-rk3128"
+          EOF
+      
+      - name: Build Armbian image
+        run: |
+          cd armbian-build
+          
+          ./compile.sh \
+            BOARD=rk3128-box \
+            BRANCH=legacy \
+            RELEASE=${{ github.event.inputs.release || 'bullseye' }} \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=${{ github.event.inputs.desktop || 'no' }} \
+            KERNEL_ONLY=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,gpg,xz \
+            EXPERT=yes \
+            2>&1 | tee ../build.log
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: armbian-rk3128-image
+          path: |
+            armbian-build/output/images/*.img*
+            armbian-build/output/images/*.txt
+          retention-days: 14
+      
+      - name: Upload build log
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+
+      - name: Create Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Armbian RK3128 Build ${{ github.run_number }}
+          files: |
+            armbian-build/output/images/*.img.xz
+            armbian-build/output/images/*.txt
+          body: |
+            ## Armbian Build for RK3128
+            
+            - **Board**: RK3128 Android TV Box
+            - **Release**: ${{ github.event.inputs.release || 'bullseye' }}
+            - **Kernel**: Linux 4.4.x (legacy)
+            - **Desktop**: ${{ github.event.inputs.desktop || 'no' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
